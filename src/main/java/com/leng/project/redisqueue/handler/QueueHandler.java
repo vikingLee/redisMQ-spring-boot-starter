@@ -23,6 +23,8 @@ public class QueueHandler {
     @Autowired
     private RedisQueueTemplate redisQueueTemplate;
     private RetryTemplate retryTemplate = RetryUtils.getTemplate(3, 300);
+    // 保存所有消费者线程的集合
+    private final Set<Thread> consumerThreads = new HashSet<>(); 
 
 
     /**
@@ -91,12 +93,13 @@ public class QueueHandler {
 
         //消费者个数
         for (int i = 1; i <= Math.max(1, annotation.getConsumers()); i++) {
-            new Thread(() -> {
-                while (true) {
+            Thread consumerThread = new Thread(() -> {
+                // 支持线程中断
+                while (!Thread.currentThread().isInterrupted()) {
                     List<Message<?>> messages = null;
                     try {
                         //从队列中获取消息
-                        messages = supplier.get();
+                        messages = (List)supplier.get();
 
                         if (log.isDebugEnabled()) {
                             log.debug("当前消费线程：queue={}, id={}", annotation.getQueue(), Thread.currentThread().getId());
@@ -148,12 +151,23 @@ public class QueueHandler {
 
                     } catch (RedisConnectionFailureException e) {
                         //一般是进程退出时报出的异常
-                        log.warn(e.getMessage());
+                        // 连接失败时可考虑退出循环（避免无限重试）
+                        log.warn("Redis 连接失败，消费者线程退出: {}", e.getMessage());
+                        Thread.currentThread().interrupt(); 
+                        break;
                     } catch (Exception e) {
                         log.error("队列出错：queue={}", annotation.getQueue(), e);
                     }
                 }
-            }).start();
+                synchronized(consumerThreads) {
+                    consumerThreads.remove(Thread.currentThread());
+                }
+            });
+            consumerThread.start();
+             // 保存新启动的线程
+            synchronized(consumerThreads){
+                consumerThreads.add(consumerThread);
+            }
         }
 
     }
